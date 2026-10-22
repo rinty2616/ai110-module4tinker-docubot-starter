@@ -1,5 +1,4 @@
-"""
-Core DocuBot class responsible for:
+"""Core DocuBot class responsible for:
 - Loading documents from the docs/ folder
 - Building a simple retrieval index (Phase 1)
 - Retrieving relevant snippets (Phase 1)
@@ -7,8 +6,10 @@ Core DocuBot class responsible for:
 - Supporting RAG answers when paired with Gemini (Phase 2)
 """
 
-import os
 import glob
+import os
+import re
+
 
 class DocuBot:
     def __init__(self, docs_folder="docs", llm_client=None):
@@ -19,10 +20,10 @@ class DocuBot:
         self.docs_folder = docs_folder
         self.llm_client = llm_client
 
-        # Load documents into memory
+        # Load documents into memory.
         self.documents = self.load_documents()  # List of (filename, text)
 
-        # Build a retrieval index (implemented in Phase 1)
+        # Build an inverted index so we know which files contain each word.
         self.index = self.build_index(self.documents)
 
     # -----------------------------------------------------------
@@ -30,10 +31,7 @@ class DocuBot:
     # -----------------------------------------------------------
 
     def load_documents(self):
-        """
-        Loads all .md and .txt files inside docs_folder.
-        Returns a list of tuples: (filename, text)
-        """
+        """Load .md and .txt files from docs_folder."""
         docs = []
         pattern = os.path.join(self.docs_folder, "*.*")
         for path in glob.glob(pattern):
@@ -45,65 +43,75 @@ class DocuBot:
         return docs
 
     # -----------------------------------------------------------
-    # Index Construction (Phase 1)
+    # Index Construction (Part 2)
     # -----------------------------------------------------------
 
     def build_index(self, documents):
-        """
-        TODO (Phase 1):
-        Build a tiny inverted index mapping lowercase words to the documents
-        they appear in.
-
-        Example structure:
-        {
-            "token": ["AUTH.md", "API_REFERENCE.md"],
-            "database": ["DATABASE.md"]
-        }
-
-        Keep this simple: split on whitespace, lowercase tokens,
-        ignore punctuation if needed.
-        """
+        """Map each lowercase word to the files where it appears."""
         index = {}
-        # TODO: implement simple indexing
+
+        for filename, text in documents:
+            words = re.findall(r"[a-z0-9_]+", text.lower())
+            for word in set(words):
+                if word not in index:
+                    index[word] = []
+                index[word].append(filename)
+
         return index
 
     # -----------------------------------------------------------
-    # Scoring and Retrieval (Phase 1)
+    # Scoring and Retrieval (Parts 2 and 3)
     # -----------------------------------------------------------
 
     def score_document(self, query, text):
-        """
-        TODO (Phase 1):
-        Return a simple relevance score for how well the text matches the query.
-
-        Suggested baseline:
-        - Convert query into lowercase words
-        - Count how many appear in the text
-        - Return the count as the score
-        """
-        # TODO: implement scoring
-        return 0
+        """Count meaningful query words that appear in text."""
+        common_words = {
+            "a", "an", "and", "are", "at", "be", "by", "can", "do",
+            "does", "for", "from", "how", "i", "in", "is", "it", "me",
+            "my", "of", "on", "or", "our", "the", "to", "was", "what",
+            "when", "where", "which", "who", "why", "with", "you", "your",
+        }
+        query_words = set(re.findall(r"[a-z0-9_]+", query.lower()))
+        query_words -= common_words
+        text_words = set(re.findall(r"[a-z0-9_]+", text.lower()))
+        return len(query_words & text_words)
 
     def retrieve(self, query, top_k=3):
-        """
-        TODO (Phase 1):
-        Use the index and scoring function to select top_k relevant document snippets.
+        """Return the best matching (filename, snippet) pairs.
 
-        Return a list of (filename, text) sorted by score descending.
+        Part 3: search paragraph-sized snippets rather than whole documents,
+        and refuse matches with too little evidence.
         """
         results = []
-        # TODO: implement retrieval logic
-        return results[:top_k]
+
+        for filename, text in self.documents:
+            # Split each document on blank lines into smaller chunks.
+            paragraphs = re.split(r"\n\s*\n", text)
+            for paragraph in paragraphs:
+                snippet = paragraph.strip()
+                if not snippet:
+                    continue
+                score = self.score_document(query, snippet)
+                if score > 0:
+                    results.append((score, filename, snippet))
+
+        # Put the most relevant snippets first.
+        results.sort(key=lambda result: result[0], reverse=True)
+
+        # Refuse when no snippet matches meaningfully.
+        meaningful_words = self.score_document(query, query)
+        min_score = 1 if meaningful_words <= 1 else 2
+        if not results or results[0][0] < min_score:
+            return []
+
+        return [(filename, snippet) for score, filename, snippet in results[:top_k]]
 
     # -----------------------------------------------------------
     # Answering Modes
     # -----------------------------------------------------------
 
     def answer_retrieval_only(self, query, top_k=3):
-        """
-        Phase 1 retrieval only mode.
-        Returns raw snippets and filenames with no LLM involved.
-        """
+        """Return snippets and filenames without involving an LLM."""
         snippets = self.retrieve(query, top_k=top_k)
 
         if not snippets:
@@ -116,11 +124,7 @@ class DocuBot:
         return "\n---\n".join(formatted)
 
     def answer_rag(self, query, top_k=3):
-        """
-        Phase 2 RAG mode.
-        Uses student retrieval to select snippets, then asks Gemini
-        to generate an answer using only those snippets.
-        """
+        """Ask Gemini to answer using only retrieved snippets."""
         if self.llm_client is None:
             raise RuntimeError(
                 "RAG mode requires an LLM client. Provide a GeminiClient instance."
@@ -138,8 +142,5 @@ class DocuBot:
     # -----------------------------------------------------------
 
     def full_corpus_text(self):
-        """
-        Returns all documents concatenated into a single string.
-        This is used in Phase 0 for naive 'generation only' baselines.
-        """
+        """Join all documents for the naive generation baseline."""
         return "\n\n".join(text for _, text in self.documents)
